@@ -88,6 +88,12 @@ std::optional<u64> NVFlinger::CreateLayer(u64 display_id) {
     return layer_id;
 }
 
+void NVFlinger::CloseLayer(u64 layer_id) {
+    for (auto& display : displays) {
+        display.CloseLayer(layer_id);
+    }
+}
+
 std::optional<u32> NVFlinger::FindBufferQueueId(u64 display_id, u64 layer_id) const {
     const auto* const layer = FindLayer(display_id, layer_id);
 
@@ -192,7 +198,7 @@ void NVFlinger::Compose() {
 
         const auto& igbp_buffer = buffer->get().igbp_buffer;
 
-        const auto& gpu = system.GPU();
+        auto& gpu = system.GPU();
         const auto& multi_fence = buffer->get().multi_fence;
         for (u32 fence_id = 0; fence_id < multi_fence.num_fences; fence_id++) {
             const auto& fence = multi_fence.fences[fence_id];

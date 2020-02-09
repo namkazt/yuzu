@@ -1018,7 +1018,14 @@ public:
                     }
                 } instanced_arrays;
 
-                INSERT_UNION_PADDING_WORDS(0x6);
+                INSERT_UNION_PADDING_WORDS(0x4);
+
+                union {
+                    BitField<0, 1, u32> enable;
+                    BitField<4, 8, u32> unk4;
+                } vp_point_size;
+
+                INSERT_UNION_PADDING_WORDS(1);
 
                 Cull cull;
 
@@ -1271,8 +1278,6 @@ public:
 
     } dirty{};
 
-    std::array<u8, Regs::NUM_REGS> dirty_pointers{};
-
     /// Reads a register value located at the input method address
     u32 GetRegisterValue(u32 method) const;
 
@@ -1300,6 +1305,10 @@ public:
     u32 GetBoundBuffer() const override {
         return regs.tex_cb_index;
     }
+
+    VideoCore::GuestDriverProfile& AccessGuestDriverProfile() override;
+
+    const VideoCore::GuestDriverProfile& AccessGuestDriverProfile() const override;
 
     /// Memory for macro code - it's undetermined how big this is, however 1MB is much larger than
     /// we've seen used.
@@ -1366,6 +1375,8 @@ private:
     Upload::State upload_state;
 
     bool execute_on{true};
+
+    std::array<u8, Regs::NUM_REGS> dirty_pointers{};
 
     /// Retrieves information about a specific TIC entry from the TIC buffer.
     Texture::TICEntry GetTICEntry(u32 tic_index) const;
@@ -1503,6 +1514,7 @@ ASSERT_REG_POSITION(primitive_restart, 0x591);
 ASSERT_REG_POSITION(index_array, 0x5F2);
 ASSERT_REG_POSITION(polygon_offset_clamp, 0x61F);
 ASSERT_REG_POSITION(instanced_arrays, 0x620);
+ASSERT_REG_POSITION(vp_point_size, 0x644);
 ASSERT_REG_POSITION(cull, 0x646);
 ASSERT_REG_POSITION(pixel_center_integer, 0x649);
 ASSERT_REG_POSITION(viewport_transform_enabled, 0x64B);

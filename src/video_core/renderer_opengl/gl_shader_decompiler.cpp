@@ -391,6 +391,7 @@ public:
         DeclareVertex();
         DeclareGeometry();
         DeclareRegisters();
+        DeclareCustomVariables();
         DeclarePredicates();
         DeclareLocalMemory();
         DeclareInternalFlags();
@@ -499,6 +500,16 @@ private:
             code.AddLine("float {} = 0.0f;", GetRegister(gpr));
         }
         if (!registers.empty()) {
+            code.AddNewLine();
+        }
+    }
+
+    void DeclareCustomVariables() {
+        const u32 num_custom_variables = ir.GetNumCustomVariables();
+        for (u32 i = 0; i < num_custom_variables; ++i) {
+            code.AddLine("float {} = 0.0f;", GetCustomVariable(i));
+        }
+        if (num_custom_variables > 0) {
             code.AddNewLine();
         }
     }
@@ -655,7 +666,8 @@ private:
         u32 binding = device.GetBaseBindings(stage).sampler;
         for (const auto& sampler : ir.GetSamplers()) {
             const std::string name = GetSampler(sampler);
-            const std::string description = fmt::format("layout (binding = {}) uniform", binding++);
+            const std::string description = fmt::format("layout (binding = {}) uniform", binding);
+            binding += sampler.IsIndexed() ? sampler.Size() : 1;
 
             std::string sampler_type = [&]() {
                 if (sampler.IsBuffer()) {
@@ -682,7 +694,11 @@ private:
                 sampler_type += "Shadow";
             }
 
-            code.AddLine("{} {} {};", description, sampler_type, name);
+            if (!sampler.IsIndexed()) {
+                code.AddLine("{} {} {};", description, sampler_type, name);
+            } else {
+                code.AddLine("{} {} {}[{}];", description, sampler_type, name, sampler.Size());
+            }
         }
         if (!ir.GetSamplers().empty()) {
             code.AddNewLine();
@@ -751,6 +767,9 @@ private:
 
     Expression Visit(const Node& node) {
         if (const auto operation = std::get_if<OperationNode>(&*node)) {
+            if (const auto amend_index = operation->GetAmendIndex()) {
+                Visit(ir.GetAmendNode(*amend_index)).CheckVoid();
+            }
             const auto operation_index = static_cast<std::size_t>(operation->GetCode());
             if (operation_index >= operation_decompilers.size()) {
                 UNREACHABLE_MSG("Out of bounds operation: {}", operation_index);
@@ -770,6 +789,11 @@ private:
                 return {"0U", Type::Uint};
             }
             return {GetRegister(index), Type::Float};
+        }
+
+        if (const auto cv = std::get_if<CustomVarNode>(&*node)) {
+            const u32 index = cv->GetIndex();
+            return {GetCustomVariable(index), Type::Float};
         }
 
         if (const auto immediate = std::get_if<ImmediateNode>(&*node)) {
@@ -872,6 +896,9 @@ private:
         }
 
         if (const auto conditional = std::get_if<ConditionalNode>(&*node)) {
+            if (const auto amend_index = conditional->GetAmendIndex()) {
+                Visit(ir.GetAmendNode(*amend_index)).CheckVoid();
+            }
             // It's invalid to call conditional on nested nodes, use an operation instead
             code.AddLine("if ({}) {{", Visit(conditional->GetCondition()).AsBool());
             ++code.scope;
@@ -1013,7 +1040,6 @@ private:
                 }
                 return {{"gl_ViewportIndex", Type::Int}};
             case 3:
-                UNIMPLEMENTED_MSG("Requires some state changes for gl_PointSize to work in shader");
                 return {{"gl_PointSize", Type::Float}};
             }
             return {};
@@ -1093,7 +1119,11 @@ private:
         } else if (!meta->ptp.empty()) {
             expr += "Offsets";
         }
-        expr += '(' + GetSampler(meta->sampler) + ", ";
+        if (!meta->sampler.IsIndexed()) {
+            expr += '(' + GetSampler(meta->sampler) + ", ";
+        } else {
+            expr += '(' + GetSampler(meta->sampler) + '[' + Visit(meta->index).AsUint() + "], ";
+        }
         expr += coord_constructors.at(count + (has_array ? 1 : 0) +
                                       (has_shadow && !separate_dc ? 1 : 0) - 1);
         expr += '(';
@@ -1305,6 +1335,8 @@ private:
             const std::string final_offset = fmt::format("({} - {}) >> 2", real, base);
             target = {fmt::format("{}[{}]", GetGlobalMemory(gmem->GetDescriptor()), final_offset),
                       Type::Uint};
+        } else if (const auto cv = std::get_if<CustomVarNode>(&*dest)) {
+            target = {GetCustomVariable(cv->GetIndex()), Type::Float};
         } else {
             UNREACHABLE_MSG("Assign called without a proper target");
         }
@@ -1850,6 +1882,13 @@ private:
                 Type::Uint};
     }
 
+    template <const std::string_view& opname, Type type>
+    Expression Atomic(Operation operation) {
+        return {fmt::format("atomic{}({}, {})", opname, Visit(operation[0]).GetCode(),
+                            Visit(operation[1]).As(type)),
+                type};
+    }
+
     Expression Branch(Operation operation) {
         const auto target = std::get_if<ImmediateNode>(&*operation[0]);
         UNIMPLEMENTED_IF(!target);
@@ -2188,6 +2227,8 @@ private:
         &GLSLDecompiler::AtomicImage<Func::Xor>,
         &GLSLDecompiler::AtomicImage<Func::Exchange>,
 
+        &GLSLDecompiler::Atomic<Func::Add, Type::Uint>,
+
         &GLSLDecompiler::Branch,
         &GLSLDecompiler::BranchIndirect,
         &GLSLDecompiler::PushFlowStack,
@@ -2221,6 +2262,10 @@ private:
 
     std::string GetRegister(u32 index) const {
         return GetDeclarationWithSuffix(index, "gpr");
+    }
+
+    std::string GetCustomVariable(u32 index) const {
+        return GetDeclarationWithSuffix(index, "custom_var");
     }
 
     std::string GetPredicate(Tegra::Shader::Pred pred) const {
@@ -2307,7 +2352,7 @@ public:
     explicit ExprDecompiler(GLSLDecompiler& decomp) : decomp{decomp} {}
 
     void operator()(const ExprAnd& expr) {
-        inner += "( ";
+        inner += '(';
         std::visit(*this, *expr.operand1);
         inner += " && ";
         std::visit(*this, *expr.operand2);
@@ -2315,7 +2360,7 @@ public:
     }
 
     void operator()(const ExprOr& expr) {
-        inner += "( ";
+        inner += '(';
         std::visit(*this, *expr.operand1);
         inner += " || ";
         std::visit(*this, *expr.operand2);
@@ -2333,28 +2378,7 @@ public:
     }
 
     void operator()(const ExprCondCode& expr) {
-        const Node cc = decomp.ir.GetConditionCode(expr.cc);
-        std::string target;
-
-        if (const auto pred = std::get_if<PredicateNode>(&*cc)) {
-            const auto index = pred->GetIndex();
-            switch (index) {
-            case Tegra::Shader::Pred::NeverExecute:
-                target = "false";
-                break;
-            case Tegra::Shader::Pred::UnusedIndex:
-                target = "true";
-                break;
-            default:
-                target = decomp.GetPredicate(index);
-                break;
-            }
-        } else if (const auto flag = std::get_if<InternalFlagNode>(&*cc)) {
-            target = decomp.GetInternalFlag(flag->GetFlag());
-        } else {
-            UNREACHABLE();
-        }
-        inner += target;
+        inner += decomp.Visit(decomp.ir.GetConditionCode(expr.cc)).AsBool();
     }
 
     void operator()(const ExprVar& expr) {
@@ -2366,8 +2390,7 @@ public:
     }
 
     void operator()(VideoCommon::Shader::ExprGprEqual& expr) {
-        inner +=
-            "( ftou(" + decomp.GetRegister(expr.gpr) + ") == " + std::to_string(expr.value) + ')';
+        inner += fmt::format("(ftou({}) == {})", decomp.GetRegister(expr.gpr), expr.value);
     }
 
     const std::string& GetResult() const {
@@ -2375,8 +2398,8 @@ public:
     }
 
 private:
-    std::string inner;
     GLSLDecompiler& decomp;
+    std::string inner;
 };
 
 class ASTDecompiler {

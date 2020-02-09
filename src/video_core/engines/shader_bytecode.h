@@ -215,6 +215,40 @@ enum class F2fRoundingOp : u64 {
     Trunc = 11,
 };
 
+enum class AtomicOp : u64 {
+    Add = 0,
+    Min = 1,
+    Max = 2,
+    Inc = 3,
+    Dec = 4,
+    And = 5,
+    Or = 6,
+    Xor = 7,
+    Exch = 8,
+};
+
+enum class GlobalAtomicOp : u64 {
+    Add = 0,
+    Min = 1,
+    Max = 2,
+    Inc = 3,
+    Dec = 4,
+    And = 5,
+    Or = 6,
+    Xor = 7,
+    Exch = 8,
+    SafeAdd = 10,
+};
+
+enum class GlobalAtomicType : u64 {
+    U32 = 0,
+    S32 = 1,
+    U64 = 2,
+    F32_FTZ_RN = 3,
+    F16x2_FTZ_RN = 4,
+    S64 = 5,
+};
+
 enum class UniformType : u64 {
     UnsignedByte = 0,
     SignedByte = 1,
@@ -234,6 +268,13 @@ enum class StoreType : u64 {
     Bits32 = 4,
     Bits64 = 5,
     Bits128 = 6,
+};
+
+enum class AtomicType : u64 {
+    U32 = 0,
+    S32 = 1,
+    U64 = 2,
+    S64 = 3,
 };
 
 enum class IMinMaxExchange : u64 {
@@ -583,6 +624,19 @@ enum class ShuffleOperation : u64 {
     Bfly = 3, // shuffleXorNV
 };
 
+enum class ShfType : u64 {
+    Bits32 = 0,
+    U64 = 2,
+    S64 = 3,
+};
+
+enum class ShfXmode : u64 {
+    None = 0,
+    HI = 1,
+    X = 2,
+    XHI = 3,
+};
+
 union Instruction {
     constexpr Instruction& operator=(const Instruction& instr) {
         value = instr.value;
@@ -733,6 +787,13 @@ union Instruction {
     union {
         BitField<39, 1, u64> wrap;
     } shr;
+
+    union {
+        BitField<37, 2, ShfType> type;
+        BitField<48, 2, ShfXmode> xmode;
+        BitField<50, 1, u64> wrap;
+        BitField<20, 6, u64> immediate;
+    } shf;
 
     union {
         BitField<39, 5, u64> shift_amount;
@@ -939,6 +1000,22 @@ union Instruction {
     } stg;
 
     union {
+        BitField<52, 4, GlobalAtomicOp> operation;
+        BitField<49, 3, GlobalAtomicType> type;
+        BitField<28, 20, s64> offset;
+    } atom;
+
+    union {
+        BitField<52, 4, AtomicOp> operation;
+        BitField<28, 2, AtomicType> type;
+        BitField<30, 22, s64> offset;
+
+        s32 GetImmediateOffset() const {
+            return static_cast<s32>(offset << 2);
+        }
+    } atoms;
+
+    union {
         BitField<32, 1, PhysicalAttributeDirection> direction;
         BitField<47, 3, AttributeSize> size;
         BitField<20, 11, u64> address;
@@ -1065,6 +1142,11 @@ union Instruction {
         BitField<54, 1, u64> abs_a;
         BitField<55, 1, u64> ftz;
     } fset;
+
+    union {
+        BitField<47, 1, u64> ftz;
+        BitField<48, 4, PredCondition> cond;
+    } fcmp;
 
     union {
         BitField<49, 1, u64> bf;
@@ -1646,6 +1728,7 @@ public:
         BFE_C,
         BFE_R,
         BFE_IMM,
+        BFI_RC,
         BFI_IMM_R,
         BRA,
         BRX,
@@ -1659,9 +1742,11 @@ public:
         ST_A,
         ST_L,
         ST_S,
-        ST,   // Store in generic memory
-        STG,  // Store in global memory
-        AL2P, // Transforms attribute memory into physical memory
+        ST,    // Store in generic memory
+        STG,   // Store in global memory
+        ATOM,  // Atomic operation on global memory
+        ATOMS, // Atomic operation on shared memory
+        AL2P,  // Transforms attribute memory into physical memory
         TEX,
         TEX_B,  // Texture Load Bindless
         TXQ,    // Texture Query
@@ -1741,6 +1826,7 @@ public:
         ICMP_R,
         ICMP_CR,
         ICMP_IMM,
+        FCMP_R,
         MUFU,  // Multi-Function Operator
         RRO_C, // Range Reduction Operator
         RRO_R,
@@ -1964,6 +2050,8 @@ private:
             INST("1110111101010---", Id::ST_L, Type::Memory, "ST_L"),
             INST("101-------------", Id::ST, Type::Memory, "ST"),
             INST("1110111011011---", Id::STG, Type::Memory, "STG"),
+            INST("11101101--------", Id::ATOM, Type::Memory, "ATOM"),
+            INST("11101100--------", Id::ATOMS, Type::Memory, "ATOMS"),
             INST("1110111110100---", Id::AL2P, Type::Memory, "AL2P"),
             INST("110000----111---", Id::TEX, Type::Texture, "TEX"),
             INST("1101111010111---", Id::TEX_B, Type::Texture, "TEX_B"),
@@ -2043,6 +2131,7 @@ private:
             INST("0101110100100---", Id::HSETP2_R, Type::HalfSetPredicate, "HSETP2_R"),
             INST("0111111-0-------", Id::HSETP2_IMM, Type::HalfSetPredicate, "HSETP2_IMM"),
             INST("0101110100011---", Id::HSET2_R, Type::HalfSet, "HSET2_R"),
+            INST("010110111010----", Id::FCMP_R, Type::Arithmetic, "FCMP_R"),
             INST("0101000010000---", Id::MUFU, Type::Arithmetic, "MUFU"),
             INST("0100110010010---", Id::RRO_C, Type::Arithmetic, "RRO_C"),
             INST("0101110010010---", Id::RRO_R, Type::Arithmetic, "RRO_R"),
@@ -2067,6 +2156,7 @@ private:
             INST("0100110000000---", Id::BFE_C, Type::Bfe, "BFE_C"),
             INST("0101110000000---", Id::BFE_R, Type::Bfe, "BFE_R"),
             INST("0011100-00000---", Id::BFE_IMM, Type::Bfe, "BFE_IMM"),
+            INST("0101001111110---", Id::BFI_RC, Type::Bfi, "BFI_RC"),
             INST("0011011-11110---", Id::BFI_IMM_R, Type::Bfi, "BFI_IMM_R"),
             INST("0100110001000---", Id::LOP_C, Type::ArithmeticInteger, "LOP_C"),
             INST("0101110001000---", Id::LOP_R, Type::ArithmeticInteger, "LOP_R"),

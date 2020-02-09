@@ -10,6 +10,7 @@
 #include "core/hle/service/acc/profile_manager.h"
 #include "core/hle/service/hid/controllers/npad.h"
 #include "input_common/main.h"
+#include "input_common/udp/client.h"
 #include "yuzu/configuration/config.h"
 #include "yuzu/uisettings.h"
 
@@ -429,6 +430,16 @@ void Config::ReadControlValues() {
                     QStringLiteral("engine:motion_emu,update_period:100,sensitivity:0.01"))
             .toString()
             .toStdString();
+    Settings::values.udp_input_address =
+        ReadSetting(QStringLiteral("udp_input_address"),
+                    QString::fromUtf8(InputCommon::CemuhookUDP::DEFAULT_ADDR))
+            .toString()
+            .toStdString();
+    Settings::values.udp_input_port = static_cast<u16>(
+        ReadSetting(QStringLiteral("udp_input_port"), InputCommon::CemuhookUDP::DEFAULT_PORT)
+            .toInt());
+    Settings::values.udp_pad_index =
+        static_cast<u8>(ReadSetting(QStringLiteral("udp_pad_index"), 0).toUInt());
 
     qt_config->endGroup();
 }
@@ -613,6 +624,10 @@ void Config::ReadPathValues() {
 void Config::ReadRendererValues() {
     qt_config->beginGroup(QStringLiteral("Renderer"));
 
+    Settings::values.renderer_backend =
+        static_cast<Settings::RendererBackend>(ReadSetting(QStringLiteral("backend"), 0).toInt());
+    Settings::values.renderer_debug = ReadSetting(QStringLiteral("debug"), false).toBool();
+    Settings::values.vulkan_device = ReadSetting(QStringLiteral("vulkan_device"), 0).toInt();
     Settings::values.resolution_factor =
         ReadSetting(QStringLiteral("resolution_factor"), 1.0).toFloat();
     Settings::values.use_frame_limit =
@@ -911,6 +926,12 @@ void Config::SaveControlValues() {
                  QString::fromStdString(Settings::values.motion_device),
                  QStringLiteral("engine:motion_emu,update_period:100,sensitivity:0.01"));
     WriteSetting(QStringLiteral("keyboard_enabled"), Settings::values.keyboard_enabled, false);
+    WriteSetting(QStringLiteral("udp_input_address"),
+                 QString::fromStdString(Settings::values.udp_input_address),
+                 QString::fromUtf8(InputCommon::CemuhookUDP::DEFAULT_ADDR));
+    WriteSetting(QStringLiteral("udp_input_port"), Settings::values.udp_input_port,
+                 InputCommon::CemuhookUDP::DEFAULT_PORT);
+    WriteSetting(QStringLiteral("udp_pad_index"), Settings::values.udp_pad_index, 0);
 
     qt_config->endGroup();
 }
@@ -1039,6 +1060,9 @@ void Config::SavePathValues() {
 void Config::SaveRendererValues() {
     qt_config->beginGroup(QStringLiteral("Renderer"));
 
+    WriteSetting(QStringLiteral("backend"), static_cast<int>(Settings::values.renderer_backend), 0);
+    WriteSetting(QStringLiteral("debug"), Settings::values.renderer_debug, false);
+    WriteSetting(QStringLiteral("vulkan_device"), Settings::values.vulkan_device, 0);
     WriteSetting(QStringLiteral("resolution_factor"),
                  static_cast<double>(Settings::values.resolution_factor), 1.0);
     WriteSetting(QStringLiteral("use_frame_limit"), Settings::values.use_frame_limit, true);

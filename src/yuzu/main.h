@@ -22,12 +22,12 @@ class Config;
 class EmuThread;
 class GameList;
 class GImageInfo;
-class GraphicsBreakPointsWidget;
 class GRenderWindow;
 class LoadingScreen;
 class MicroProfileDialog;
 class ProfilerWidget;
 class QLabel;
+class QPushButton;
 class WaitTreeWidget;
 enum class GameListOpenTarget;
 class GameListPlaceholder;
@@ -41,10 +41,6 @@ class ContentProvider;
 class ManualContentProvider;
 class VfsFilesystem;
 } // namespace FileSys
-
-namespace Tegra {
-class DebugContext;
-}
 
 enum class EmulatedDirectoryTarget {
     NAND,
@@ -135,7 +131,6 @@ private:
     void PreventOSSleep();
     void AllowOSSleep();
 
-    QStringList GetUnsupportedGLExtensions();
     bool LoadROM(const QString& filename);
     void BootGame(const QString& filename);
     void ShutdownGame();
@@ -223,8 +218,6 @@ private:
 
     Ui::MainWindow ui;
 
-    std::shared_ptr<Tegra::DebugContext> debug_context;
-
     GRenderWindow* render_window;
     GameList* game_list;
     LoadingScreen* loading_screen;
@@ -236,6 +229,9 @@ private:
     QLabel* emu_speed_label = nullptr;
     QLabel* game_fps_label = nullptr;
     QLabel* emu_frametime_label = nullptr;
+    QPushButton* async_status_button = nullptr;
+    QPushButton* renderer_status_button = nullptr;
+    QPushButton* dock_status_button = nullptr;
     QTimer status_bar_update_timer;
 
     std::unique_ptr<Config> config;
@@ -255,7 +251,6 @@ private:
     // Debugger panes
     ProfilerWidget* profilerWidget;
     MicroProfileDialog* microProfileDialog;
-    GraphicsBreakPointsWidget* graphicsBreakpointsWidget;
     WaitTreeWidget* waitTreeWidget;
 
     QAction* actions_recent_files[max_recent_files_item];

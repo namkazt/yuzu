@@ -353,6 +353,7 @@ private:
         DeclareFragment();
         DeclareCompute();
         DeclareRegisters();
+        DeclareCustomVariables();
         DeclarePredicates();
         DeclareLocalMemory();
         DeclareSharedMemory();
@@ -542,11 +543,10 @@ private:
             return;
         }
 
-        for (u32 rt = 0; rt < static_cast<u32>(frag_colors.size()); ++rt) {
-            if (!specialization.enabled_rendertargets[rt]) {
+        for (u32 rt = 0; rt < static_cast<u32>(std::size(frag_colors)); ++rt) {
+            if (!IsRenderTargetEnabled(rt)) {
                 continue;
             }
-
             const Id id = AddGlobalVariable(OpVariable(t_out_float4, spv::StorageClass::Output));
             Name(id, fmt::format("frag_color{}", rt));
             Decorate(id, spv::Decoration::Location, rt);
@@ -584,6 +584,15 @@ private:
             const Id id = OpVariable(t_prv_float, spv::StorageClass::Private, v_float_zero);
             Name(id, fmt::format("gpr_{}", gpr));
             registers.emplace(gpr, AddGlobalVariable(id));
+        }
+    }
+
+    void DeclareCustomVariables() {
+        const u32 num_custom_variables = ir.GetNumCustomVariables();
+        for (u32 i = 0; i < num_custom_variables; ++i) {
+            const Id id = OpVariable(t_prv_float, spv::StorageClass::Private, v_float_zero);
+            Name(id, fmt::format("custom_var_{}", i));
+            custom_variables.emplace(i, AddGlobalVariable(id));
         }
     }
 
@@ -852,6 +861,15 @@ private:
         return binding;
     }
 
+    bool IsRenderTargetEnabled(u32 rt) const {
+        for (u32 component = 0; component < 4; ++component) {
+            if (header.ps.IsColorComponentOutputEnabled(rt, component)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     bool IsInputAttributeArray() const {
         return stage == ShaderType::TesselationControl || stage == ShaderType::TesselationEval ||
                stage == ShaderType::Geometry;
@@ -954,6 +972,10 @@ private:
 
     Expression Visit(const Node& node) {
         if (const auto operation = std::get_if<OperationNode>(&*node)) {
+            if (const auto amend_index = operation->GetAmendIndex()) {
+                [[maybe_unused]] const Type type = Visit(ir.GetAmendNode(*amend_index)).type;
+                ASSERT(type == Type::Void);
+            }
             const auto operation_index = static_cast<std::size_t>(operation->GetCode());
             const auto decompiler = operation_decompilers[operation_index];
             if (decompiler == nullptr) {
@@ -968,6 +990,11 @@ private:
                 return {v_float_zero, Type::Float};
             }
             return {OpLoad(t_float, registers.at(index)), Type::Float};
+        }
+
+        if (const auto cv = std::get_if<CustomVarNode>(&*node)) {
+            const u32 index = cv->GetIndex();
+            return {OpLoad(t_float, custom_variables.at(index)), Type::Float};
         }
 
         if (const auto immediate = std::get_if<ImmediateNode>(&*node)) {
@@ -1111,15 +1138,7 @@ private:
         }
 
         if (const auto gmem = std::get_if<GmemNode>(&*node)) {
-            const Id gmem_buffer = global_buffers.at(gmem->GetDescriptor());
-            const Id real = AsUint(Visit(gmem->GetRealAddress()));
-            const Id base = AsUint(Visit(gmem->GetBaseAddress()));
-
-            Id offset = OpISub(t_uint, real, base);
-            offset = OpUDiv(t_uint, offset, Constant(t_uint, 4U));
-            return {OpLoad(t_float,
-                           OpAccessChain(t_gmem_float, gmem_buffer, Constant(t_uint, 0U), offset)),
-                    Type::Float};
+            return {OpLoad(t_uint, GetGlobalMemoryPointer(*gmem)), Type::Uint};
         }
 
         if (const auto lmem = std::get_if<LmemNode>(&*node)) {
@@ -1130,10 +1149,7 @@ private:
         }
 
         if (const auto smem = std::get_if<SmemNode>(&*node)) {
-            Id address = AsUint(Visit(smem->GetAddress()));
-            address = OpShiftRightLogical(t_uint, address, Constant(t_uint, 2U));
-            const Id pointer = OpAccessChain(t_smem_uint, shared_memory, address);
-            return {OpLoad(t_uint, pointer), Type::Uint};
+            return {OpLoad(t_uint, GetSharedMemoryPointer(*smem)), Type::Uint};
         }
 
         if (const auto internal_flag = std::get_if<InternalFlagNode>(&*node)) {
@@ -1142,6 +1158,10 @@ private:
         }
 
         if (const auto conditional = std::get_if<ConditionalNode>(&*node)) {
+            if (const auto amend_index = conditional->GetAmendIndex()) {
+                [[maybe_unused]] const Type type = Visit(ir.GetAmendNode(*amend_index)).type;
+                ASSERT(type == Type::Void);
+            }
             // It's invalid to call conditional on nested nodes, use an operation instead
             const Id true_label = OpLabel();
             const Id skip_label = OpLabel();
@@ -1323,20 +1343,13 @@ private:
             target = {OpAccessChain(t_prv_float, local_memory, address), Type::Float};
 
         } else if (const auto smem = std::get_if<SmemNode>(&*dest)) {
-            ASSERT(stage == ShaderType::Compute);
-            Id address = AsUint(Visit(smem->GetAddress()));
-            address = OpShiftRightLogical(t_uint, address, Constant(t_uint, 2U));
-            target = {OpAccessChain(t_smem_uint, shared_memory, address), Type::Uint};
+            target = {GetSharedMemoryPointer(*smem), Type::Uint};
 
         } else if (const auto gmem = std::get_if<GmemNode>(&*dest)) {
-            const Id real = AsUint(Visit(gmem->GetRealAddress()));
-            const Id base = AsUint(Visit(gmem->GetBaseAddress()));
-            const Id diff = OpISub(t_uint, real, base);
-            const Id offset = OpShiftRightLogical(t_uint, diff, Constant(t_uint, 2));
+            target = {GetGlobalMemoryPointer(*gmem), Type::Uint};
 
-            const Id gmem_buffer = global_buffers.at(gmem->GetDescriptor());
-            target = {OpAccessChain(t_gmem_float, gmem_buffer, Constant(t_uint, 0), offset),
-                      Type::Float};
+        } else if (const auto cv = std::get_if<CustomVarNode>(&*dest)) {
+            target = {custom_variables.at(cv->GetIndex()), Type::Float};
 
         } else {
             UNIMPLEMENTED();
@@ -1788,6 +1801,24 @@ private:
         return {};
     }
 
+    Expression AtomicAdd(Operation operation) {
+        Id pointer;
+        if (const auto smem = std::get_if<SmemNode>(&*operation[0])) {
+            pointer = GetSharedMemoryPointer(*smem);
+        } else if (const auto gmem = std::get_if<GmemNode>(&*operation[0])) {
+            pointer = GetGlobalMemoryPointer(*gmem);
+        } else {
+            UNREACHABLE();
+            return {Constant(t_uint, 0), Type::Uint};
+        }
+
+        const Id scope = Constant(t_uint, static_cast<u32>(spv::Scope::Device));
+        const Id semantics = Constant(t_uint, 0U);
+
+        const Id value = AsUint(Visit(operation[1]));
+        return {OpAtomicIAdd(t_uint, pointer, scope, semantics, value), Type::Uint};
+    }
+
     Expression Branch(Operation operation) {
         const auto& target = std::get<ImmediateNode>(*operation[0]);
         OpStore(jmp_to, Constant(t_uint, target.GetValue()));
@@ -1868,19 +1899,14 @@ private:
             // rendertargets/components are skipped in the register assignment.
             u32 current_reg = 0;
             for (u32 rt = 0; rt < Maxwell::NumRenderTargets; ++rt) {
-                if (!specialization.enabled_rendertargets[rt]) {
-                    // Skip rendertargets that are not enabled
-                    continue;
-                }
                 // TODO(Subv): Figure out how dual-source blending is configured in the Switch.
                 for (u32 component = 0; component < 4; ++component) {
-                    const Id pointer = AccessElement(t_out_float, frag_colors.at(rt), component);
-                    if (header.ps.IsColorComponentOutputEnabled(rt, component)) {
-                        OpStore(pointer, SafeGetRegister(current_reg));
-                        ++current_reg;
-                    } else {
-                        OpStore(pointer, component == 3 ? v_float_one : v_float_zero);
+                    if (!header.ps.IsColorComponentOutputEnabled(rt, component)) {
+                        continue;
                     }
+                    const Id pointer = AccessElement(t_out_float, frag_colors[rt], component);
+                    OpStore(pointer, SafeGetRegister(current_reg));
+                    ++current_reg;
                 }
             }
             if (header.ps.omap.depth) {
@@ -2219,6 +2245,22 @@ private:
         return {};
     }
 
+    Id GetGlobalMemoryPointer(const GmemNode& gmem) {
+        const Id real = AsUint(Visit(gmem.GetRealAddress()));
+        const Id base = AsUint(Visit(gmem.GetBaseAddress()));
+        const Id diff = OpISub(t_uint, real, base);
+        const Id offset = OpShiftRightLogical(t_uint, diff, Constant(t_uint, 2));
+        const Id buffer = global_buffers.at(gmem.GetDescriptor());
+        return OpAccessChain(t_gmem_uint, buffer, Constant(t_uint, 0), offset);
+    }
+
+    Id GetSharedMemoryPointer(const SmemNode& smem) {
+        ASSERT(stage == ShaderType::Compute);
+        Id address = AsUint(Visit(smem.GetAddress()));
+        address = OpShiftRightLogical(t_uint, address, Constant(t_uint, 2U));
+        return OpAccessChain(t_smem_uint, shared_memory, address);
+    }
+
     static constexpr std::array operation_decompilers = {
         &SPIRVDecompiler::Assign,
 
@@ -2365,6 +2407,8 @@ private:
         &SPIRVDecompiler::AtomicImageXor,
         &SPIRVDecompiler::AtomicImageExchange,
 
+        &SPIRVDecompiler::AtomicAdd,
+
         &SPIRVDecompiler::Branch,
         &SPIRVDecompiler::BranchIndirect,
         &SPIRVDecompiler::PushFlowStack,
@@ -2459,9 +2503,9 @@ private:
 
     Id t_smem_uint{};
 
-    const Id t_gmem_float = TypePointer(spv::StorageClass::StorageBuffer, t_float);
+    const Id t_gmem_uint = TypePointer(spv::StorageClass::StorageBuffer, t_uint);
     const Id t_gmem_array =
-        Name(Decorate(TypeRuntimeArray(t_float), spv::Decoration::ArrayStride, 4U), "GmemArray");
+        Name(Decorate(TypeRuntimeArray(t_uint), spv::Decoration::ArrayStride, 4U), "GmemArray");
     const Id t_gmem_struct = MemberDecorate(
         Decorate(TypeStruct(t_gmem_array), spv::Decoration::Block), 0, spv::Decoration::Offset, 0);
     const Id t_gmem_ssbo = TypePointer(spv::StorageClass::StorageBuffer, t_gmem_struct);
@@ -2482,6 +2526,7 @@ private:
     Id out_vertex{};
     Id in_vertex{};
     std::map<u32, Id> registers;
+    std::map<u32, Id> custom_variables;
     std::map<Tegra::Shader::Pred, Id> predicates;
     std::map<u32, Id> flow_variables;
     Id local_memory{};

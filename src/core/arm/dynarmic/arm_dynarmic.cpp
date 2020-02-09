@@ -10,11 +10,12 @@
 #include "common/microprofile.h"
 #include "core/arm/dynarmic/arm_dynarmic.h"
 #include "core/core.h"
-#include "core/core_cpu.h"
+#include "core/core_manager.h"
 #include "core/core_timing.h"
 #include "core/core_timing_util.h"
 #include "core/gdbstub/gdbstub.h"
 #include "core/hle/kernel/process.h"
+#include "core/hle/kernel/scheduler.h"
 #include "core/hle/kernel/svc.h"
 #include "core/hle/kernel/vm_manager.h"
 #include "core/memory.h"
@@ -87,7 +88,7 @@ public:
             if (GDBStub::IsServerEnabled()) {
                 parent.jit->HaltExecution();
                 parent.SetPC(pc);
-                Kernel::Thread* thread = Kernel::GetCurrentThread();
+                Kernel::Thread* const thread = parent.system.CurrentScheduler().GetCurrentThread();
                 parent.SaveContext(thread->GetContext());
                 GDBStub::Break();
                 GDBStub::SendTrap(thread, 5);
@@ -141,6 +142,7 @@ std::unique_ptr<Dynarmic::A64::Jit> ARM_Dynarmic::MakeJit(Common::PageTable& pag
     config.page_table = reinterpret_cast<void**>(page_table.pointers.data());
     config.page_table_address_space_bits = address_space_bits;
     config.silently_mirror_page_table = false;
+    config.absolute_offset_page_table = true;
 
     // Multi-process state
     config.processor_id = core_index;

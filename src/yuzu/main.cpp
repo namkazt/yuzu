@@ -93,7 +93,6 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 #include "core/perf_stats.h"
 #include "core/settings.h"
 #include "core/telemetry_session.h"
-#include "video_core/debug_utils/debug_utils.h"
 #include "yuzu/about_dialog.h"
 #include "yuzu/bootmanager.h"
 #include "yuzu/compatdb.h"
@@ -101,7 +100,6 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 #include "yuzu/configuration/config.h"
 #include "yuzu/configuration/configure_dialog.h"
 #include "yuzu/debugger/console.h"
-#include "yuzu/debugger/graphics/graphics_breakpoints.h"
 #include "yuzu/debugger/profiler.h"
 #include "yuzu/debugger/wait_tree.h"
 #include "yuzu/discord.h"
@@ -186,8 +184,6 @@ GMainWindow::GMainWindow()
       vfs(std::make_shared<FileSys::RealVfsFilesystem>()),
       provider(std::make_unique<FileSys::ManualContentProvider>()) {
     InitializeLogging();
-
-    debug_context = Tegra::DebugContext::Construct();
 
     setAcceptDrops(true);
     ui.setupUi(this);
@@ -458,7 +454,6 @@ void GMainWindow::InitializeWidgets() {
     // Create status bar
     message_label = new QLabel();
     // Configured separately for left alignment
-    message_label->setVisible(false);
     message_label->setFrameStyle(QFrame::NoFrame);
     message_label->setContentsMargins(4, 0, 4, 0);
     message_label->setAlignment(Qt::AlignLeft);
@@ -480,8 +475,73 @@ void GMainWindow::InitializeWidgets() {
         label->setVisible(false);
         label->setFrameStyle(QFrame::NoFrame);
         label->setContentsMargins(4, 0, 4, 0);
-        statusBar()->addPermanentWidget(label, 0);
+        statusBar()->addPermanentWidget(label);
     }
+
+    // Setup Dock button
+    dock_status_button = new QPushButton();
+    dock_status_button->setObjectName(QStringLiteral("TogglableStatusBarButton"));
+    dock_status_button->setFocusPolicy(Qt::NoFocus);
+    connect(dock_status_button, &QPushButton::clicked, [&] {
+        Settings::values.use_docked_mode = !Settings::values.use_docked_mode;
+        dock_status_button->setChecked(Settings::values.use_docked_mode);
+        OnDockedModeChanged(!Settings::values.use_docked_mode, Settings::values.use_docked_mode);
+    });
+    dock_status_button->setText(tr("DOCK"));
+    dock_status_button->setCheckable(true);
+    dock_status_button->setChecked(Settings::values.use_docked_mode);
+    statusBar()->insertPermanentWidget(0, dock_status_button);
+
+    // Setup ASync button
+    async_status_button = new QPushButton();
+    async_status_button->setObjectName(QStringLiteral("TogglableStatusBarButton"));
+    async_status_button->setFocusPolicy(Qt::NoFocus);
+    connect(async_status_button, &QPushButton::clicked, [&] {
+        if (emulation_running) {
+            return;
+        }
+        Settings::values.use_asynchronous_gpu_emulation =
+            !Settings::values.use_asynchronous_gpu_emulation;
+        async_status_button->setChecked(Settings::values.use_asynchronous_gpu_emulation);
+        Settings::Apply();
+    });
+    async_status_button->setText(tr("ASYNC"));
+    async_status_button->setCheckable(true);
+    async_status_button->setChecked(Settings::values.use_asynchronous_gpu_emulation);
+    statusBar()->insertPermanentWidget(0, async_status_button);
+
+    // Setup Renderer API button
+    renderer_status_button = new QPushButton();
+    renderer_status_button->setObjectName(QStringLiteral("RendererStatusBarButton"));
+    renderer_status_button->setCheckable(true);
+    renderer_status_button->setFocusPolicy(Qt::NoFocus);
+    connect(renderer_status_button, &QPushButton::toggled, [=](bool checked) {
+        renderer_status_button->setText(checked ? tr("VULKAN") : tr("OPENGL"));
+    });
+    renderer_status_button->toggle();
+
+#ifndef HAS_VULKAN
+    renderer_status_button->setChecked(false);
+    renderer_status_button->setCheckable(false);
+    renderer_status_button->setDisabled(true);
+#else
+    renderer_status_button->setChecked(Settings::values.renderer_backend ==
+                                       Settings::RendererBackend::Vulkan);
+    connect(renderer_status_button, &QPushButton::clicked, [=] {
+        if (emulation_running) {
+            return;
+        }
+        if (renderer_status_button->isChecked()) {
+            Settings::values.renderer_backend = Settings::RendererBackend::Vulkan;
+        } else {
+            Settings::values.renderer_backend = Settings::RendererBackend::OpenGL;
+        }
+
+        Settings::Apply();
+    });
+#endif // HAS_VULKAN
+    statusBar()->insertPermanentWidget(0, renderer_status_button);
+
     statusBar()->setVisible(true);
     setStyleSheet(QStringLiteral("QStatusBar::item{border: none;}"));
 }
@@ -494,11 +554,6 @@ void GMainWindow::InitializeDebugWidgets() {
     microProfileDialog->hide();
     debug_menu->addAction(microProfileDialog->toggleViewAction());
 #endif
-
-    graphicsBreakpointsWidget = new GraphicsBreakPointsWidget(debug_context, this);
-    addDockWidget(Qt::RightDockWidgetArea, graphicsBreakpointsWidget);
-    graphicsBreakpointsWidget->hide();
-    debug_menu->addAction(graphicsBreakpointsWidget->toggleViewAction());
 
     waitTreeWidget = new WaitTreeWidget(this);
     addDockWidget(Qt::LeftDockWidgetArea, waitTreeWidget);
@@ -535,18 +590,29 @@ void GMainWindow::InitializeHotkeys() {
 
     const QString main_window = QStringLiteral("Main Window");
     const QString load_file = QStringLiteral("Load File");
+    const QString load_amiibo = QStringLiteral("Load Amiibo");
     const QString exit_yuzu = QStringLiteral("Exit yuzu");
+    const QString restart_emulation = QStringLiteral("Restart Emulation");
     const QString stop_emulation = QStringLiteral("Stop Emulation");
     const QString toggle_filter_bar = QStringLiteral("Toggle Filter Bar");
     const QString toggle_status_bar = QStringLiteral("Toggle Status Bar");
     const QString fullscreen = QStringLiteral("Fullscreen");
+    const QString capture_screenshot = QStringLiteral("Capture Screenshot");
 
     ui.action_Load_File->setShortcut(hotkey_registry.GetKeySequence(main_window, load_file));
     ui.action_Load_File->setShortcutContext(
         hotkey_registry.GetShortcutContext(main_window, load_file));
 
+    ui.action_Load_Amiibo->setShortcut(hotkey_registry.GetKeySequence(main_window, load_amiibo));
+    ui.action_Load_Amiibo->setShortcutContext(
+        hotkey_registry.GetShortcutContext(main_window, load_amiibo));
+
     ui.action_Exit->setShortcut(hotkey_registry.GetKeySequence(main_window, exit_yuzu));
     ui.action_Exit->setShortcutContext(hotkey_registry.GetShortcutContext(main_window, exit_yuzu));
+
+    ui.action_Restart->setShortcut(hotkey_registry.GetKeySequence(main_window, restart_emulation));
+    ui.action_Restart->setShortcutContext(
+        hotkey_registry.GetShortcutContext(main_window, restart_emulation));
 
     ui.action_Stop->setShortcut(hotkey_registry.GetKeySequence(main_window, stop_emulation));
     ui.action_Stop->setShortcutContext(
@@ -561,6 +627,11 @@ void GMainWindow::InitializeHotkeys() {
         hotkey_registry.GetKeySequence(main_window, toggle_status_bar));
     ui.action_Show_Status_Bar->setShortcutContext(
         hotkey_registry.GetShortcutContext(main_window, toggle_status_bar));
+
+    ui.action_Capture_Screenshot->setShortcut(
+        hotkey_registry.GetKeySequence(main_window, capture_screenshot));
+    ui.action_Capture_Screenshot->setShortcutContext(
+        hotkey_registry.GetShortcutContext(main_window, capture_screenshot));
 
     connect(hotkey_registry.GetHotkey(main_window, QStringLiteral("Load File"), this),
             &QShortcut::activated, this, &GMainWindow::OnMenuLoadFile);
@@ -633,6 +704,7 @@ void GMainWindow::InitializeHotkeys() {
                 Settings::values.use_docked_mode = !Settings::values.use_docked_mode;
                 OnDockedModeChanged(!Settings::values.use_docked_mode,
                                     Settings::values.use_docked_mode);
+                dock_status_button->setChecked(Settings::values.use_docked_mode);
             });
 }
 
@@ -799,77 +871,17 @@ void GMainWindow::AllowOSSleep() {
 #endif
 }
 
-QStringList GMainWindow::GetUnsupportedGLExtensions() {
-    QStringList unsupported_ext;
-
-    if (!GLAD_GL_ARB_buffer_storage) {
-        unsupported_ext.append(QStringLiteral("ARB_buffer_storage"));
-    }
-    if (!GLAD_GL_ARB_direct_state_access) {
-        unsupported_ext.append(QStringLiteral("ARB_direct_state_access"));
-    }
-    if (!GLAD_GL_ARB_vertex_type_10f_11f_11f_rev) {
-        unsupported_ext.append(QStringLiteral("ARB_vertex_type_10f_11f_11f_rev"));
-    }
-    if (!GLAD_GL_ARB_texture_mirror_clamp_to_edge) {
-        unsupported_ext.append(QStringLiteral("ARB_texture_mirror_clamp_to_edge"));
-    }
-    if (!GLAD_GL_ARB_multi_bind) {
-        unsupported_ext.append(QStringLiteral("ARB_multi_bind"));
-    }
-    if (!GLAD_GL_ARB_clip_control) {
-        unsupported_ext.append(QStringLiteral("ARB_clip_control"));
-    }
-
-    // Extensions required to support some texture formats.
-    if (!GLAD_GL_EXT_texture_compression_s3tc) {
-        unsupported_ext.append(QStringLiteral("EXT_texture_compression_s3tc"));
-    }
-    if (!GLAD_GL_ARB_texture_compression_rgtc) {
-        unsupported_ext.append(QStringLiteral("ARB_texture_compression_rgtc"));
-    }
-    if (!GLAD_GL_ARB_depth_buffer_float) {
-        unsupported_ext.append(QStringLiteral("ARB_depth_buffer_float"));
-    }
-
-    for (const QString& ext : unsupported_ext) {
-        LOG_CRITICAL(Frontend, "Unsupported GL extension: {}", ext.toStdString());
-    }
-
-    return unsupported_ext;
-}
-
 bool GMainWindow::LoadROM(const QString& filename) {
     // Shutdown previous session if the emu thread is still active...
     if (emu_thread != nullptr)
         ShutdownGame();
 
-    render_window->InitRenderTarget();
-
-    {
-        Core::Frontend::ScopeAcquireWindowContext acquire_context{*render_window};
-        if (!gladLoadGL()) {
-            QMessageBox::critical(this, tr("Error while initializing OpenGL 4.3 Core!"),
-                                  tr("Your GPU may not support OpenGL 4.3, or you do not "
-                                     "have the latest graphics driver."));
-            return false;
-        }
-    }
-
-    const QStringList unsupported_gl_extensions = GetUnsupportedGLExtensions();
-    if (!unsupported_gl_extensions.empty()) {
-        QMessageBox::critical(this, tr("Error while initializing OpenGL Core!"),
-                              tr("Your GPU may not support one or more required OpenGL"
-                                 "extensions. Please ensure you have the latest graphics "
-                                 "driver.<br><br>Unsupported extensions:<br>") +
-                                  unsupported_gl_extensions.join(QStringLiteral("<br>")));
+    if (!render_window->InitRenderTarget()) {
         return false;
     }
 
     Core::System& system{Core::System::GetInstance()};
     system.SetFilesystem(vfs);
-
-    system.SetGPUDebugContext(debug_context);
 
     system.SetAppletFrontendSet({
         nullptr,                                     // Parental Controls
@@ -975,7 +987,9 @@ void GMainWindow::BootGame(const QString& filename) {
     // Create and start the emulation thread
     emu_thread = std::make_unique<EmuThread>(render_window);
     emit EmulationStarting(emu_thread.get());
-    render_window->moveContext();
+    if (Settings::values.renderer_backend == Settings::RendererBackend::OpenGL) {
+        render_window->moveContext();
+    }
     emu_thread->start();
 
     connect(render_window, &GRenderWindow::Closed, this, &GMainWindow::OnStopGame);
@@ -995,6 +1009,8 @@ void GMainWindow::BootGame(const QString& filename) {
         game_list_placeholder->hide();
     }
     status_bar_update_timer.start(2000);
+    async_status_button->setDisabled(true);
+    renderer_status_button->setDisabled(true);
 
     const u64 title_id = Core::System::GetInstance().CurrentProcess()->GetTitleID();
 
@@ -1060,10 +1076,13 @@ void GMainWindow::ShutdownGame() {
 
     // Disable status bar updates
     status_bar_update_timer.stop();
-    message_label->setVisible(false);
     emu_speed_label->setVisible(false);
     game_fps_label->setVisible(false);
     emu_frametime_label->setVisible(false);
+    async_status_button->setEnabled(true);
+#ifdef HAS_VULKAN
+    renderer_status_button->setEnabled(true);
+#endif
 
     emulation_running = false;
 
@@ -1831,6 +1850,13 @@ void GMainWindow::OnConfigure() {
     }
 
     config->Save();
+
+    dock_status_button->setChecked(Settings::values.use_docked_mode);
+    async_status_button->setChecked(Settings::values.use_asynchronous_gpu_emulation);
+#ifdef HAS_VULKAN
+    renderer_status_button->setChecked(Settings::values.renderer_backend ==
+                                       Settings::RendererBackend::Vulkan);
+#endif
 }
 
 void GMainWindow::OnLoadAmiibo() {
@@ -2023,7 +2049,6 @@ void GMainWindow::OnCoreError(Core::System::ResultStatus result, std::string det
         if (emu_thread) {
             emu_thread->SetRunning(true);
             message_label->setText(status_message);
-            message_label->setVisible(true);
         }
     }
 }
@@ -2190,6 +2215,18 @@ void GMainWindow::closeEvent(QCloseEvent* event) {
     QWidget::closeEvent(event);
 }
 
+void GMainWindow::keyPressEvent(QKeyEvent* event) {
+    if (render_window) {
+        render_window->ForwardKeyPressEvent(event);
+    }
+}
+
+void GMainWindow::keyReleaseEvent(QKeyEvent* event) {
+    if (render_window) {
+        render_window->ForwardKeyReleaseEvent(event);
+    }
+}
+
 static bool IsSingleFileDropEvent(QDropEvent* event) {
     const QMimeData* mimeData = event->mimeData();
     return mimeData->hasUrls() && mimeData->urls().length() == 1;
@@ -2220,18 +2257,6 @@ void GMainWindow::dragEnterEvent(QDragEnterEvent* event) {
 
 void GMainWindow::dragMoveEvent(QDragMoveEvent* event) {
     event->acceptProposedAction();
-}
-
-void GMainWindow::keyPressEvent(QKeyEvent* event) {
-    if (render_window) {
-        render_window->ForwardKeyPressEvent(event);
-    }
-}
-
-void GMainWindow::keyReleaseEvent(QKeyEvent* event) {
-    if (render_window) {
-        render_window->ForwardKeyReleaseEvent(event);
-    }
 }
 
 bool GMainWindow::ConfirmChangeGame() {
@@ -2285,8 +2310,16 @@ void GMainWindow::UpdateUITheme() {
     QStringList theme_paths(default_theme_paths);
 
     if (is_default_theme || current_theme.isEmpty()) {
-        qApp->setStyleSheet({});
-        setStyleSheet({});
+        const QString theme_uri(QStringLiteral(":default/style.qss"));
+        QFile f(theme_uri);
+        if (f.open(QFile::ReadOnly | QFile::Text)) {
+            QTextStream ts(&f);
+            qApp->setStyleSheet(ts.readAll());
+            setStyleSheet(ts.readAll());
+        } else {
+            qApp->setStyleSheet({});
+            setStyleSheet({});
+        }
         theme_paths.append(default_icons);
         QIcon::setThemeName(default_icons);
     } else {

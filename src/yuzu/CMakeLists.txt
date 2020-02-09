@@ -36,9 +36,6 @@ add_executable(yuzu
     configuration/configure_filesystem.cpp
     configuration/configure_filesystem.h
     configuration/configure_filesystem.ui
-    configuration/configure_gamelist.cpp
-    configuration/configure_gamelist.h
-    configuration/configure_gamelist.ui
     configuration/configure_general.cpp
     configuration/configure_general.h
     configuration/configure_general.ui
@@ -75,14 +72,12 @@ add_executable(yuzu
     configuration/configure_touchscreen_advanced.cpp
     configuration/configure_touchscreen_advanced.h
     configuration/configure_touchscreen_advanced.ui
+    configuration/configure_ui.cpp
+    configuration/configure_ui.h
+    configuration/configure_ui.ui
     configuration/configure_web.cpp
     configuration/configure_web.h
     configuration/configure_web.ui
-    debugger/graphics/graphics_breakpoint_observer.cpp
-    debugger/graphics/graphics_breakpoint_observer.h
-    debugger/graphics/graphics_breakpoints.cpp
-    debugger/graphics/graphics_breakpoints.h
-    debugger/graphics/graphics_breakpoints_p.h
     debugger/console.cpp
     debugger/console.h
     debugger/profiler.cpp
@@ -204,4 +199,9 @@ if (MSVC)
     copy_yuzu_Qt5_deps(yuzu)
     copy_yuzu_SDL_deps(yuzu)
     copy_yuzu_unicorn_deps(yuzu)
+endif()
+
+if (ENABLE_VULKAN)
+    target_include_directories(yuzu PRIVATE ../../externals/Vulkan-Headers/include)
+    target_compile_definitions(yuzu PRIVATE HAS_VULKAN)
 endif()

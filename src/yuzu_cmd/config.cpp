@@ -12,6 +12,7 @@
 #include "core/hle/service/acc/profile_manager.h"
 #include "core/settings.h"
 #include "input_common/main.h"
+#include "input_common/udp/client.h"
 #include "yuzu_cmd/config.h"
 #include "yuzu_cmd/default_ini.h"
 
@@ -297,6 +298,10 @@ void Config::ReadValues() {
         sdl2_config->GetInteger("ControlsGeneral", "touch_diameter_x", 15);
     Settings::values.touchscreen.diameter_y =
         sdl2_config->GetInteger("ControlsGeneral", "touch_diameter_y", 15);
+    Settings::values.udp_input_address =
+        sdl2_config->Get("Controls", "udp_input_address", InputCommon::CemuhookUDP::DEFAULT_ADDR);
+    Settings::values.udp_input_port = static_cast<u16>(sdl2_config->GetInteger(
+        "Controls", "udp_input_port", InputCommon::CemuhookUDP::DEFAULT_PORT));
 
     std::transform(keyboard_keys.begin(), keyboard_keys.end(),
                    Settings::values.keyboard_keys.begin(), InputCommon::GenerateKeyboardParam);
@@ -366,6 +371,12 @@ void Config::ReadValues() {
     Settings::values.use_multi_core = sdl2_config->GetBoolean("Core", "use_multi_core", false);
 
     // Renderer
+    const int renderer_backend = sdl2_config->GetInteger(
+        "Renderer", "backend", static_cast<int>(Settings::RendererBackend::OpenGL));
+    Settings::values.renderer_backend = static_cast<Settings::RendererBackend>(renderer_backend);
+    Settings::values.renderer_debug = sdl2_config->GetBoolean("Renderer", "debug", false);
+    Settings::values.vulkan_device = sdl2_config->GetInteger("Renderer", "vulkan_device", 0);
+
     Settings::values.resolution_factor =
         static_cast<float>(sdl2_config->GetReal("Renderer", "resolution_factor", 1.0));
     Settings::values.use_frame_limit = sdl2_config->GetBoolean("Renderer", "use_frame_limit", true);

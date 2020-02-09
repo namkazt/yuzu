@@ -15,7 +15,7 @@
 #include "common/string_util.h"
 #include "core/arm/exclusive_monitor.h"
 #include "core/core.h"
-#include "core/core_cpu.h"
+#include "core/core_manager.h"
 #include "core/core_timing.h"
 #include "core/core_timing_util.h"
 #include "core/hle/kernel/address_arbiter.h"
@@ -1863,10 +1863,14 @@ static ResultCode CreateTransferMemory(Core::System& system, Handle* handle, VAd
     }
 
     auto& kernel = system.Kernel();
-    auto transfer_mem_handle = TransferMemory::Create(kernel, addr, size, perms);
+    auto transfer_mem_handle = TransferMemory::Create(kernel, system.Memory(), addr, size, perms);
+
+    if (const auto reserve_result{transfer_mem_handle->Reserve()}; reserve_result.IsError()) {
+        return reserve_result;
+    }
 
     auto& handle_table = kernel.CurrentProcess()->GetHandleTable();
-    const auto result = handle_table.Create(std::move(transfer_mem_handle));
+    const auto result{handle_table.Create(std::move(transfer_mem_handle))};
     if (result.Failed()) {
         return result.Code();
     }

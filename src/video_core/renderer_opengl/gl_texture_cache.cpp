@@ -44,7 +44,7 @@ struct FormatTuple {
 
 constexpr std::array<FormatTuple, VideoCore::Surface::MaxPixelFormat> tex_format_tuples = {{
     {GL_RGBA8, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8_REV, false},                        // ABGR8U
-    {GL_RGBA8, GL_RGBA, GL_BYTE, false},                                            // ABGR8S
+    {GL_RGBA8_SNORM, GL_RGBA, GL_BYTE, false},                                      // ABGR8S
     {GL_RGBA8UI, GL_RGBA_INTEGER, GL_UNSIGNED_BYTE, false},                         // ABGR8UI
     {GL_RGB565, GL_RGB, GL_UNSIGNED_SHORT_5_6_5_REV, false},                        // B5G6R5U
     {GL_RGB10_A2, GL_RGBA, GL_UNSIGNED_INT_2_10_10_10_REV, false},                  // A2B10G10R10U
@@ -83,9 +83,9 @@ constexpr std::array<FormatTuple, VideoCore::Surface::MaxPixelFormat> tex_format
     {GL_RGB32F, GL_RGB, GL_FLOAT, false},                                           // RGB32F
     {GL_SRGB8_ALPHA8, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8_REV, false},                 // RGBA8_SRGB
     {GL_RG8, GL_RG, GL_UNSIGNED_BYTE, false},                                       // RG8U
-    {GL_RG8, GL_RG, GL_BYTE, false},                                                // RG8S
+    {GL_RG8_SNORM, GL_RG, GL_BYTE, false},                                          // RG8S
     {GL_RG32UI, GL_RG_INTEGER, GL_UNSIGNED_INT, false},                             // RG32UI
-    {GL_RGB16F, GL_RGBA16, GL_HALF_FLOAT, false},                                   // RGBX16F
+    {GL_RGB16F, GL_RGBA, GL_HALF_FLOAT, false},                                     // RGBX16F
     {GL_R32UI, GL_RED_INTEGER, GL_UNSIGNED_INT, false},                             // R32UI
     {GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, false},                                   // ASTC_2D_8X8
     {GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, false},                                   // ASTC_2D_8X5
@@ -176,6 +176,19 @@ GLint GetSwizzleSource(SwizzleSource source) {
     return GL_NONE;
 }
 
+GLenum GetComponent(PixelFormat format, bool is_first) {
+    switch (format) {
+    case PixelFormat::Z24S8:
+    case PixelFormat::Z32FS8:
+        return is_first ? GL_DEPTH_COMPONENT : GL_STENCIL_INDEX;
+    case PixelFormat::S8Z24:
+        return is_first ? GL_STENCIL_INDEX : GL_DEPTH_COMPONENT;
+    default:
+        UNREACHABLE();
+        return GL_DEPTH_COMPONENT;
+    }
+}
+
 void ApplyTextureDefaults(const SurfaceParams& params, GLuint texture) {
     if (params.IsBuffer()) {
         return;
@@ -184,7 +197,7 @@ void ApplyTextureDefaults(const SurfaceParams& params, GLuint texture) {
     glTextureParameteri(texture, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTextureParameteri(texture, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTextureParameteri(texture, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTextureParameteri(texture, GL_TEXTURE_MAX_LEVEL, params.num_levels - 1);
+    glTextureParameteri(texture, GL_TEXTURE_MAX_LEVEL, static_cast<GLint>(params.num_levels - 1));
     if (params.num_levels == 1) {
         glTextureParameterf(texture, GL_TEXTURE_LOD_BIAS, 1000.0f);
     }
@@ -253,14 +266,12 @@ void CachedSurface::DownloadTexture(std::vector<u8>& staging_buffer) {
         glPixelStorei(GL_PACK_ALIGNMENT, std::min(8U, params.GetRowAlignment(level)));
         glPixelStorei(GL_PACK_ROW_LENGTH, static_cast<GLint>(params.GetMipWidth(level)));
         const std::size_t mip_offset = params.GetHostMipmapLevelOffset(level);
+        u8* const mip_data = staging_buffer.data() + mip_offset;
+        const GLsizei size = static_cast<GLsizei>(params.GetHostMipmapSize(level));
         if (is_compressed) {
-            glGetCompressedTextureImage(texture.handle, level,
-                                        static_cast<GLsizei>(params.GetHostMipmapSize(level)),
-                                        staging_buffer.data() + mip_offset);
+            glGetCompressedTextureImage(texture.handle, level, size, mip_data);
         } else {
-            glGetTextureImage(texture.handle, level, format, type,
-                              static_cast<GLsizei>(params.GetHostMipmapSize(level)),
-                              staging_buffer.data() + mip_offset);
+            glGetTextureImage(texture.handle, level, format, type, size, mip_data);
         }
     }
 }
@@ -418,11 +429,21 @@ void CachedSurfaceView::ApplySwizzle(SwizzleSource x_source, SwizzleSource y_sou
     if (new_swizzle == swizzle)
         return;
     swizzle = new_swizzle;
-    const std::array<GLint, 4> gl_swizzle = {GetSwizzleSource(x_source), GetSwizzleSource(y_source),
-                                             GetSwizzleSource(z_source),
-                                             GetSwizzleSource(w_source)};
+    const std::array gl_swizzle = {GetSwizzleSource(x_source), GetSwizzleSource(y_source),
+                                   GetSwizzleSource(z_source), GetSwizzleSource(w_source)};
     const GLuint handle = GetTexture();
-    glTextureParameteriv(handle, GL_TEXTURE_SWIZZLE_RGBA, gl_swizzle.data());
+    const PixelFormat format = surface.GetSurfaceParams().pixel_format;
+    switch (format) {
+    case PixelFormat::Z24S8:
+    case PixelFormat::Z32FS8:
+    case PixelFormat::S8Z24:
+        glTextureParameteri(handle, GL_DEPTH_STENCIL_TEXTURE_MODE,
+                            GetComponent(format, x_source == SwizzleSource::R));
+        break;
+    default:
+        glTextureParameteriv(handle, GL_TEXTURE_SWIZZLE_RGBA, gl_swizzle.data());
+        break;
+    }
 }
 
 OGLTextureView CachedSurfaceView::CreateTextureView() const {
@@ -531,8 +552,11 @@ void TextureCacheOpenGL::ImageBlit(View& src_view, View& dst_view,
     const Common::Rectangle<u32>& dst_rect = copy_config.dst_rect;
     const bool is_linear = copy_config.filter == Tegra::Engines::Fermi2D::Filter::Linear;
 
-    glBlitFramebuffer(src_rect.left, src_rect.top, src_rect.right, src_rect.bottom, dst_rect.left,
-                      dst_rect.top, dst_rect.right, dst_rect.bottom, buffers,
+    glBlitFramebuffer(static_cast<GLint>(src_rect.left), static_cast<GLint>(src_rect.top),
+                      static_cast<GLint>(src_rect.right), static_cast<GLint>(src_rect.bottom),
+                      static_cast<GLint>(dst_rect.left), static_cast<GLint>(dst_rect.top),
+                      static_cast<GLint>(dst_rect.right), static_cast<GLint>(dst_rect.bottom),
+                      buffers,
                       is_linear && (buffers == GL_COLOR_BUFFER_BIT) ? GL_LINEAR : GL_NEAREST);
 }
 

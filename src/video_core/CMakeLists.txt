@@ -4,8 +4,6 @@ add_library(video_core STATIC
     buffer_cache/map_interval.h
     dma_pusher.cpp
     dma_pusher.h
-    debug_utils/debug_utils.cpp
-    debug_utils/debug_utils.h
     engines/const_buffer_engine_interface.h
     engines/const_buffer_info.h
     engines/engine_upload.cpp
@@ -31,6 +29,8 @@ add_library(video_core STATIC
     gpu_synch.h
     gpu_thread.cpp
     gpu_thread.h
+    guest_driver.cpp
+    guest_driver.h
     macro_interpreter.cpp
     macro_interpreter.h
     memory_manager.cpp
@@ -155,14 +155,32 @@ if (ENABLE_VULKAN)
         renderer_vulkan/fixed_pipeline_state.h
         renderer_vulkan/maxwell_to_vk.cpp
         renderer_vulkan/maxwell_to_vk.h
+        renderer_vulkan/renderer_vulkan.h
+        renderer_vulkan/renderer_vulkan.cpp
+        renderer_vulkan/vk_blit_screen.cpp
+        renderer_vulkan/vk_blit_screen.h
         renderer_vulkan/vk_buffer_cache.cpp
         renderer_vulkan/vk_buffer_cache.h
+        renderer_vulkan/vk_compute_pass.cpp
+        renderer_vulkan/vk_compute_pass.h
+        renderer_vulkan/vk_compute_pipeline.cpp
+        renderer_vulkan/vk_compute_pipeline.h
+        renderer_vulkan/vk_descriptor_pool.cpp
+        renderer_vulkan/vk_descriptor_pool.h
         renderer_vulkan/vk_device.cpp
         renderer_vulkan/vk_device.h
+        renderer_vulkan/vk_graphics_pipeline.cpp
+        renderer_vulkan/vk_graphics_pipeline.h
         renderer_vulkan/vk_image.cpp
         renderer_vulkan/vk_image.h
         renderer_vulkan/vk_memory_manager.cpp
         renderer_vulkan/vk_memory_manager.h
+        renderer_vulkan/vk_pipeline_cache.cpp
+        renderer_vulkan/vk_pipeline_cache.h
+        renderer_vulkan/vk_rasterizer.cpp
+        renderer_vulkan/vk_rasterizer.h
+        renderer_vulkan/vk_renderpass_cache.cpp
+        renderer_vulkan/vk_renderpass_cache.h
         renderer_vulkan/vk_resource_manager.cpp
         renderer_vulkan/vk_resource_manager.h
         renderer_vulkan/vk_sampler_cache.cpp
@@ -171,12 +189,19 @@ if (ENABLE_VULKAN)
         renderer_vulkan/vk_scheduler.h
         renderer_vulkan/vk_shader_decompiler.cpp
         renderer_vulkan/vk_shader_decompiler.h
+        renderer_vulkan/vk_shader_util.cpp
+        renderer_vulkan/vk_shader_util.h
         renderer_vulkan/vk_staging_buffer_pool.cpp
         renderer_vulkan/vk_staging_buffer_pool.h
         renderer_vulkan/vk_stream_buffer.cpp
         renderer_vulkan/vk_stream_buffer.h
         renderer_vulkan/vk_swapchain.cpp
-        renderer_vulkan/vk_swapchain.h)
+        renderer_vulkan/vk_swapchain.h
+        renderer_vulkan/vk_texture_cache.cpp
+        renderer_vulkan/vk_texture_cache.h
+        renderer_vulkan/vk_update_descriptor.cpp
+        renderer_vulkan/vk_update_descriptor.h
+    )
 
     target_include_directories(video_core PRIVATE sirit ../../externals/Vulkan-Headers/include)
     target_compile_definitions(video_core PRIVATE HAS_VULKAN)

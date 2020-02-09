@@ -34,9 +34,6 @@ using VideoCommon::Shader::ShaderIR;
 
 namespace {
 
-// One UBO is always reserved for emulation values on staged shaders
-constexpr u32 STAGE_RESERVED_UBOS = 1;
-
 constexpr u32 STAGE_MAIN_OFFSET = 10;
 constexpr u32 KERNEL_MAIN_OFFSET = 0;
 
@@ -217,6 +214,7 @@ std::unique_ptr<ConstBufferLocker> MakeLocker(Core::System& system, ShaderType s
 }
 
 void FillLocker(ConstBufferLocker& locker, const ShaderDiskCacheUsage& usage) {
+    locker.SetBoundBuffer(usage.bound_buffer);
     for (const auto& key : usage.keys) {
         const auto [buffer, offset] = key.first;
         locker.InsertKey(buffer, offset, key.second);
@@ -243,7 +241,6 @@ CachedProgram BuildShader(const Device& device, u64 unique_identifier, ShaderTyp
     if (!code_b.empty()) {
         ir_b.emplace(code_b, main_offset, COMPILER_SETTINGS, locker);
     }
-    const auto entries = GLShader::GetEntries(ir);
 
     std::string source = fmt::format(R"(// {}
 #version 430 core
@@ -264,6 +261,10 @@ CachedProgram BuildShader(const Device& device, u64 unique_identifier, ShaderTyp
                   "#extension GL_NV_shader_thread_group : require\n"
                   "#extension GL_NV_shader_thread_shuffle : require\n";
     }
+    // This pragma stops Nvidia's driver from over optimizing math (probably using fp16 operations)
+    // on places where we don't want to.
+    // Thanks to Ryujinx for finding this workaround.
+    source += "#pragma optionNV(fastmath off)\n";
 
     if (shader_type == ShaderType::Geometry) {
         const auto [glsl_topology, max_vertices] = GetPrimitiveDescription(variant.primitive_mode);
@@ -314,9 +315,10 @@ std::unordered_set<GLenum> GetSupportedFormats() {
 
 CachedShader::CachedShader(const ShaderParameters& params, ShaderType shader_type,
                            GLShader::ShaderEntries entries, ProgramCode code, ProgramCode code_b)
-    : RasterizerCacheObject{params.host_ptr}, system{params.system}, disk_cache{params.disk_cache},
-      device{params.device}, cpu_addr{params.cpu_addr}, unique_identifier{params.unique_identifier},
-      shader_type{shader_type}, entries{entries}, code{std::move(code)}, code_b{std::move(code_b)} {
+    : RasterizerCacheObject{params.host_ptr}, system{params.system},
+      disk_cache{params.disk_cache}, device{params.device}, cpu_addr{params.cpu_addr},
+      unique_identifier{params.unique_identifier}, shader_type{shader_type},
+      entries{std::move(entries)}, code{std::move(code)}, code_b{std::move(code_b)} {
     if (!params.precompiled_variants) {
         return;
     }
@@ -417,7 +419,8 @@ bool CachedShader::EnsureValidLockerVariant() {
 
 ShaderDiskCacheUsage CachedShader::GetUsage(const ProgramVariant& variant,
                                             const ConstBufferLocker& locker) const {
-    return ShaderDiskCacheUsage{unique_identifier, variant, locker.GetKeys(),
+    return ShaderDiskCacheUsage{unique_identifier,         variant,
+                                locker.GetBoundBuffer(),   locker.GetKeys(),
                                 locker.GetBoundSamplers(), locker.GetBindlessSamplers()};
 }
 

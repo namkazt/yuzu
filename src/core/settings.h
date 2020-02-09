@@ -371,6 +371,11 @@ enum class SDMCSize : u64 {
     S1TB = 0x10000000000ULL,
 };
 
+enum class RendererBackend {
+    OpenGL = 0,
+    Vulkan = 1,
+};
+
 struct Values {
     // System
     bool use_docked_mode;
@@ -401,6 +406,9 @@ struct Values {
     std::string motion_device;
     TouchscreenInput touchscreen;
     std::atomic_bool is_device_reload_pending{true};
+    std::string udp_input_address;
+    u16 udp_input_port;
+    u8 udp_pad_index;
 
     // Core
     bool use_multi_core;
@@ -416,6 +424,10 @@ struct Values {
     SDMCSize sdmc_size;
 
     // Renderer
+    RendererBackend renderer_backend;
+    bool renderer_debug;
+    int vulkan_device;
+
     float resolution_factor;
     bool use_frame_limit;
     u16 frame_limit;
