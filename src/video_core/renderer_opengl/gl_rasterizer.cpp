@@ -25,6 +25,7 @@
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/engines/shader_type.h"
 #include "video_core/memory_manager.h"
+#include "video_core/renderer_opengl/gl_query_cache.h"
 #include "video_core/renderer_opengl/gl_rasterizer.h"
 #include "video_core/renderer_opengl/gl_shader_cache.h"
 #include "video_core/renderer_opengl/gl_shader_gen.h"
@@ -92,8 +93,8 @@ std::size_t GetConstBufferSize(const Tegra::Engines::ConstBufferInfo& buffer,
 RasterizerOpenGL::RasterizerOpenGL(Core::System& system, Core::Frontend::EmuWindow& emu_window,
                                    ScreenInfo& info)
     : RasterizerAccelerated{system.Memory()}, texture_cache{system, *this, device},
-      shader_cache{*this, system, emu_window, device}, system{system}, screen_info{info},
-      buffer_cache{*this, system, device, STREAM_BUFFER_SIZE} {
+      shader_cache{*this, system, emu_window, device}, query_cache{system, *this}, system{system},
+      screen_info{info}, buffer_cache{*this, system, device, STREAM_BUFFER_SIZE} {
     shader_program_manager = std::make_unique<GLShader::ProgramManager>();
     state.draw.shader_program = 0;
     state.Apply();
@@ -541,11 +542,16 @@ void RasterizerOpenGL::Clear() {
     } else if (use_stencil) {
         glClearBufferiv(GL_STENCIL, 0, &regs.clear_stencil);
     }
+
+    ++num_queued_commands;
 }
 
 void RasterizerOpenGL::Draw(bool is_indexed, bool is_instanced) {
     MICROPROFILE_SCOPE(OpenGL_Drawing);
     auto& gpu = system.GPU().Maxwell3D();
+    const auto& regs = gpu.regs;
+
+    query_cache.UpdateCounters();
 
     SyncRasterizeEnable(state);
     SyncColorMask();
@@ -611,7 +617,7 @@ void RasterizerOpenGL::Draw(bool is_indexed, bool is_instanced) {
 
     // Setup shaders and their used resources.
     texture_cache.GuardSamplers(true);
-    const auto primitive_mode = MaxwellToGL::PrimitiveTopology(gpu.regs.draw.topology);
+    const GLenum primitive_mode = MaxwellToGL::PrimitiveTopology(gpu.regs.draw.topology);
     SetupShaders(primitive_mode);
     texture_cache.GuardSamplers(false);
 
@@ -638,33 +644,45 @@ void RasterizerOpenGL::Draw(bool is_indexed, bool is_instanced) {
         glTextureBarrier();
     }
 
+    ++num_queued_commands;
+
     const GLuint base_instance = static_cast<GLuint>(gpu.regs.vb_base_instance);
     const GLsizei num_instances =
         static_cast<GLsizei>(is_instanced ? gpu.mme_draw.instance_count : 1);
     if (is_indexed) {
-        const GLenum index_format = MaxwellToGL::IndexFormat(gpu.regs.index_array.format);
         const GLint base_vertex = static_cast<GLint>(gpu.regs.vb_element_base);
         const GLsizei num_vertices = static_cast<GLsizei>(gpu.regs.index_array.count);
-        glDrawElementsInstancedBaseVertexBaseInstance(
-            primitive_mode, num_vertices, index_format,
-            reinterpret_cast<const void*>(index_buffer_offset), num_instances, base_vertex,
-            base_instance);
+        const GLvoid* offset = reinterpret_cast<const GLvoid*>(index_buffer_offset);
+        const GLenum format = MaxwellToGL::IndexFormat(gpu.regs.index_array.format);
+        if (num_instances == 1 && base_instance == 0 && base_vertex == 0) {
+            glDrawElements(primitive_mode, num_vertices, format, offset);
+        } else if (num_instances == 1 && base_instance == 0) {
+            glDrawElementsBaseVertex(primitive_mode, num_vertices, format, offset, base_vertex);
+        } else if (base_vertex == 0 && base_instance == 0) {
+            glDrawElementsInstanced(primitive_mode, num_vertices, format, offset, num_instances);
+        } else if (base_vertex == 0) {
+            glDrawElementsInstancedBaseInstance(primitive_mode, num_vertices, format, offset,
+                                                num_instances, base_instance);
+        } else if (base_instance == 0) {
+            glDrawElementsInstancedBaseVertex(primitive_mode, num_vertices, format, offset,
+                                              num_instances, base_vertex);
+        } else {
+            glDrawElementsInstancedBaseVertexBaseInstance(primitive_mode, num_vertices, format,
+                                                          offset, num_instances, base_vertex,
+                                                          base_instance);
+        }
     } else {
         const GLint base_vertex = static_cast<GLint>(gpu.regs.vertex_buffer.first);
         const GLsizei num_vertices = static_cast<GLsizei>(gpu.regs.vertex_buffer.count);
-        glDrawArraysInstancedBaseInstance(primitive_mode, base_vertex, num_vertices, num_instances,
-                                          base_instance);
+        if (num_instances == 1 && base_instance == 0) {
+            glDrawArrays(primitive_mode, base_vertex, num_vertices);
+        } else if (base_instance == 0) {
+            glDrawArraysInstanced(primitive_mode, base_vertex, num_vertices, num_instances);
+        } else {
+            glDrawArraysInstancedBaseInstance(primitive_mode, base_vertex, num_vertices,
+                                              num_instances, base_instance);
+        }
     }
-}
-
-bool RasterizerOpenGL::DrawBatch(bool is_indexed) {
-    Draw(is_indexed, false);
-    return true;
-}
-
-bool RasterizerOpenGL::DrawMultiBatch(bool is_indexed) {
-    Draw(is_indexed, true);
-    return true;
 }
 
 void RasterizerOpenGL::DispatchCompute(GPUVAddr code_addr) {
@@ -707,6 +725,16 @@ void RasterizerOpenGL::DispatchCompute(GPUVAddr code_addr) {
     state.ApplyProgramPipeline();
 
     glDispatchCompute(launch_desc.grid_dim_x, launch_desc.grid_dim_y, launch_desc.grid_dim_z);
+    ++num_queued_commands;
+}
+
+void RasterizerOpenGL::ResetCounter(VideoCore::QueryType type) {
+    query_cache.ResetCounter(type);
+}
+
+void RasterizerOpenGL::Query(GPUVAddr gpu_addr, VideoCore::QueryType type,
+                             std::optional<u64> timestamp) {
+    query_cache.Query(gpu_addr, type, timestamp);
 }
 
 void RasterizerOpenGL::FlushAll() {}
@@ -718,6 +746,7 @@ void RasterizerOpenGL::FlushRegion(CacheAddr addr, u64 size) {
     }
     texture_cache.FlushRegion(addr, size);
     buffer_cache.FlushRegion(addr, size);
+    query_cache.FlushRegion(addr, size);
 }
 
 void RasterizerOpenGL::InvalidateRegion(CacheAddr addr, u64 size) {
@@ -728,6 +757,7 @@ void RasterizerOpenGL::InvalidateRegion(CacheAddr addr, u64 size) {
     texture_cache.InvalidateRegion(addr, size);
     shader_cache.InvalidateRegion(addr, size);
     buffer_cache.InvalidateRegion(addr, size);
+    query_cache.InvalidateRegion(addr, size);
 }
 
 void RasterizerOpenGL::FlushAndInvalidateRegion(CacheAddr addr, u64 size) {
@@ -738,10 +768,18 @@ void RasterizerOpenGL::FlushAndInvalidateRegion(CacheAddr addr, u64 size) {
 }
 
 void RasterizerOpenGL::FlushCommands() {
+    // Only flush when we have commands queued to OpenGL.
+    if (num_queued_commands == 0) {
+        return;
+    }
+    num_queued_commands = 0;
     glFlush();
 }
 
 void RasterizerOpenGL::TickFrame() {
+    // Ticking a frame means that buffers will be swapped, calling glFlush implicitly.
+    num_queued_commands = 0;
+
     buffer_cache.TickFrame();
 }
 
@@ -1220,6 +1258,7 @@ void RasterizerOpenGL::SyncPointState() {
     // Limit the point size to 1 since nouveau sometimes sets a point size of 0 (and that's invalid
     // in OpenGL).
     state.point.program_control = regs.vp_point_size.enable != 0;
+    state.point.sprite = regs.point_sprite_enable != 0;
     state.point.size = std::max(1.0f, regs.point_size);
 }
 

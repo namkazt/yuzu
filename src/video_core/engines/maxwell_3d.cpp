@@ -4,16 +4,20 @@
 
 #include <cinttypes>
 #include <cstring>
+#include <optional>
 #include "common/assert.h"
 #include "core/core.h"
 #include "core/core_timing.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/engines/shader_type.h"
+#include "video_core/gpu.h"
 #include "video_core/memory_manager.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/textures/texture.h"
 
 namespace Tegra::Engines {
+
+using VideoCore::QueryType;
 
 /// First register id that is actually a Macro call.
 constexpr u32 MacroRegistersStart = 0xE00;
@@ -399,6 +403,10 @@ void Maxwell3D::CallMethod(const GPU::MethodCall& method_call) {
         ProcessQueryCondition();
         break;
     }
+    case MAXWELL3D_REG_INDEX(counter_reset): {
+        ProcessCounterReset();
+        break;
+    }
     case MAXWELL3D_REG_INDEX(sync_info): {
         ProcessSyncPoint();
         break;
@@ -481,7 +489,7 @@ void Maxwell3D::FlushMMEInlineDraw() {
 
     const bool is_indexed = mme_draw.current_mode == MMEDrawMode::Indexed;
     if (ShouldExecute()) {
-        rasterizer.DrawMultiBatch(is_indexed);
+        rasterizer.Draw(is_indexed, true);
     }
 
     // TODO(bunnei): Below, we reset vertex count so that we can use these registers to determine if
@@ -519,61 +527,51 @@ void Maxwell3D::ProcessFirmwareCall4() {
     regs.reg_array[0xd00] = 1;
 }
 
-void Maxwell3D::ProcessQueryGet() {
-    const GPUVAddr sequence_address{regs.query.QueryAddress()};
-    // Since the sequence address is given as a GPU VAddr, we have to convert it to an application
-    // VAddr before writing.
-
-    // TODO(Subv): Support the other query units.
-    ASSERT_MSG(regs.query.query_get.unit == Regs::QueryUnit::Crop,
-               "Units other than CROP are unimplemented");
-
-    u64 result = 0;
-
-    // TODO(Subv): Support the other query variables
-    switch (regs.query.query_get.select) {
-    case Regs::QuerySelect::Zero:
-        // This seems to actually write the query sequence to the query address.
-        result = regs.query.query_sequence;
-        break;
-    default:
-        result = 1;
-        UNIMPLEMENTED_MSG("Unimplemented query select type {}",
-                          static_cast<u32>(regs.query.query_get.select.Value()));
-    }
-
-    // TODO(Subv): Research and implement how query sync conditions work.
-
+void Maxwell3D::StampQueryResult(u64 payload, bool long_query) {
     struct LongQueryResult {
         u64_le value;
         u64_le timestamp;
     };
     static_assert(sizeof(LongQueryResult) == 16, "LongQueryResult has wrong size");
+    const GPUVAddr sequence_address{regs.query.QueryAddress()};
+    if (long_query) {
+        // Write the 128-bit result structure in long mode. Note: We emulate an infinitely fast
+        // GPU, this command may actually take a while to complete in real hardware due to GPU
+        // wait queues.
+        LongQueryResult query_result{payload, system.GPU().GetTicks()};
+        memory_manager.WriteBlock(sequence_address, &query_result, sizeof(query_result));
+    } else {
+        memory_manager.Write<u32>(sequence_address, static_cast<u32>(payload));
+    }
+}
 
-    switch (regs.query.query_get.mode) {
-    case Regs::QueryMode::Write:
-    case Regs::QueryMode::Write2: {
-        u32 sequence = regs.query.query_sequence;
-        if (regs.query.query_get.short_query) {
-            // Write the current query sequence to the sequence address.
-            // TODO(Subv): Find out what happens if you use a long query type but mark it as a short
-            // query.
-            memory_manager.Write<u32>(sequence_address, sequence);
-        } else {
-            // Write the 128-bit result structure in long mode. Note: We emulate an infinitely fast
-            // GPU, this command may actually take a while to complete in real hardware due to GPU
-            // wait queues.
-            LongQueryResult query_result{};
-            query_result.value = result;
-            // TODO(Subv): Generate a real GPU timestamp and write it here instead of CoreTiming
-            query_result.timestamp = system.CoreTiming().GetTicks();
-            memory_manager.WriteBlock(sequence_address, &query_result, sizeof(query_result));
+void Maxwell3D::ProcessQueryGet() {
+    // TODO(Subv): Support the other query units.
+    ASSERT_MSG(regs.query.query_get.unit == Regs::QueryUnit::Crop,
+               "Units other than CROP are unimplemented");
+
+    switch (regs.query.query_get.operation) {
+    case Regs::QueryOperation::Release:
+        StampQueryResult(regs.query.query_sequence, regs.query.query_get.short_query == 0);
+        break;
+    case Regs::QueryOperation::Acquire:
+        // TODO(Blinkhawk): Under this operation, the GPU waits for the CPU to write a value that
+        // matches the current payload.
+        UNIMPLEMENTED_MSG("Unimplemented query operation ACQUIRE");
+        break;
+    case Regs::QueryOperation::Counter:
+        if (const std::optional<u64> result = GetQueryResult()) {
+            // If the query returns an empty optional it means it's cached and deferred.
+            // In this case we have a non-empty result, so we stamp it immediately.
+            StampQueryResult(*result, regs.query.query_get.short_query == 0);
         }
         break;
-    }
+    case Regs::QueryOperation::Trap:
+        UNIMPLEMENTED_MSG("Unimplemented query operation TRAP");
+        break;
     default:
-        UNIMPLEMENTED_MSG("Query mode {} not implemented",
-                          static_cast<u32>(regs.query.query_get.mode.Value()));
+        UNIMPLEMENTED_MSG("Unknown query operation");
+        break;
     }
 }
 
@@ -590,20 +588,20 @@ void Maxwell3D::ProcessQueryCondition() {
     }
     case Regs::ConditionMode::ResNonZero: {
         Regs::QueryCompare cmp;
-        memory_manager.ReadBlockUnsafe(condition_address, &cmp, sizeof(cmp));
+        memory_manager.ReadBlock(condition_address, &cmp, sizeof(cmp));
         execute_on = cmp.initial_sequence != 0U && cmp.initial_mode != 0U;
         break;
     }
     case Regs::ConditionMode::Equal: {
         Regs::QueryCompare cmp;
-        memory_manager.ReadBlockUnsafe(condition_address, &cmp, sizeof(cmp));
+        memory_manager.ReadBlock(condition_address, &cmp, sizeof(cmp));
         execute_on =
             cmp.initial_sequence == cmp.current_sequence && cmp.initial_mode == cmp.current_mode;
         break;
     }
     case Regs::ConditionMode::NotEqual: {
         Regs::QueryCompare cmp;
-        memory_manager.ReadBlockUnsafe(condition_address, &cmp, sizeof(cmp));
+        memory_manager.ReadBlock(condition_address, &cmp, sizeof(cmp));
         execute_on =
             cmp.initial_sequence != cmp.current_sequence || cmp.initial_mode != cmp.current_mode;
         break;
@@ -613,6 +611,18 @@ void Maxwell3D::ProcessQueryCondition() {
         execute_on = true;
         break;
     }
+    }
+}
+
+void Maxwell3D::ProcessCounterReset() {
+    switch (regs.counter_reset) {
+    case Regs::CounterReset::SampleCnt:
+        rasterizer.ResetCounter(QueryType::SamplesPassed);
+        break;
+    default:
+        LOG_WARNING(Render_OpenGL, "Unimplemented counter reset={}",
+                    static_cast<int>(regs.counter_reset));
+        break;
     }
 }
 
@@ -644,7 +654,7 @@ void Maxwell3D::DrawArrays() {
 
     const bool is_indexed{regs.index_array.count && !regs.vertex_buffer.count};
     if (ShouldExecute()) {
-        rasterizer.DrawBatch(is_indexed);
+        rasterizer.Draw(is_indexed, false);
     }
 
     // TODO(bunnei): Below, we reset vertex count so that we can use these registers to determine if
@@ -655,6 +665,22 @@ void Maxwell3D::DrawArrays() {
         regs.index_array.count = 0;
     } else {
         regs.vertex_buffer.count = 0;
+    }
+}
+
+std::optional<u64> Maxwell3D::GetQueryResult() {
+    switch (regs.query.query_get.select) {
+    case Regs::QuerySelect::Zero:
+        return 0;
+    case Regs::QuerySelect::SamplesPassed:
+        // Deferred.
+        rasterizer.Query(regs.query.QueryAddress(), VideoCore::QueryType::SamplesPassed,
+                         system.GPU().GetTicks());
+        return {};
+    default:
+        UNIMPLEMENTED_MSG("Unimplemented query select type {}",
+                          static_cast<u32>(regs.query.query_get.select.Value()));
+        return 1;
     }
 }
 

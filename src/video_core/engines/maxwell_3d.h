@@ -6,6 +6,7 @@
 
 #include <array>
 #include <bitset>
+#include <optional>
 #include <type_traits>
 #include <unordered_map>
 #include <vector>
@@ -71,12 +72,11 @@ public:
         static constexpr std::size_t MaxConstBuffers = 18;
         static constexpr std::size_t MaxConstBufferSize = 0x10000;
 
-        enum class QueryMode : u32 {
-            Write = 0,
-            Sync = 1,
-            // TODO(Subv): It is currently unknown what the difference between method 2 and method 0
-            // is.
-            Write2 = 2,
+        enum class QueryOperation : u32 {
+            Release = 0,
+            Acquire = 1,
+            Counter = 2,
+            Trap = 3,
         };
 
         enum class QueryUnit : u32 {
@@ -410,6 +410,27 @@ public:
             Linear = 1,
         };
 
+        enum class CounterReset : u32 {
+            SampleCnt = 0x01,
+            Unk02 = 0x02,
+            Unk03 = 0x03,
+            Unk04 = 0x04,
+            EmittedPrimitives = 0x10, // Not tested
+            Unk11 = 0x11,
+            Unk12 = 0x12,
+            Unk13 = 0x13,
+            Unk15 = 0x15,
+            Unk16 = 0x16,
+            Unk17 = 0x17,
+            Unk18 = 0x18,
+            Unk1A = 0x1A,
+            Unk1B = 0x1B,
+            Unk1C = 0x1C,
+            Unk1D = 0x1D,
+            Unk1E = 0x1E,
+            GeneratedPrimitives = 0x1F,
+        };
+
         struct Cull {
             enum class FrontFace : u32 {
                 ClockWise = 0x0900,
@@ -704,8 +725,8 @@ public:
                 INSERT_UNION_PADDING_WORDS(0x15);
 
                 s32 stencil_back_func_ref;
-                u32 stencil_back_func_mask;
                 u32 stencil_back_mask;
+                u32 stencil_back_func_mask;
 
                 INSERT_UNION_PADDING_WORDS(0xC);
 
@@ -858,11 +879,19 @@ public:
                     BitField<7, 1, u32> c7;
                 } clip_distance_enabled;
 
-                INSERT_UNION_PADDING_WORDS(0x1);
+                u32 samplecnt_enable;
 
                 float point_size;
 
-                INSERT_UNION_PADDING_WORDS(0x7);
+                INSERT_UNION_PADDING_WORDS(0x1);
+
+                u32 point_sprite_enable;
+
+                INSERT_UNION_PADDING_WORDS(0x3);
+
+                CounterReset counter_reset;
+
+                INSERT_UNION_PADDING_WORDS(0x1);
 
                 u32 zeta_enable;
 
@@ -1077,7 +1106,7 @@ public:
                     u32 query_sequence;
                     union {
                         u32 raw;
-                        BitField<0, 2, QueryMode> mode;
+                        BitField<0, 2, QueryOperation> operation;
                         BitField<4, 1, u32> fence;
                         BitField<12, 4, QueryUnit> unit;
                         BitField<16, 1, QuerySyncCondition> sync_cond;
@@ -1409,8 +1438,14 @@ private:
     /// Handles a write to the QUERY_GET register.
     void ProcessQueryGet();
 
-    // Handles Conditional Rendering
+    /// Writes the query result accordingly.
+    void StampQueryResult(u64 payload, bool long_query);
+
+    /// Handles conditional rendering.
     void ProcessQueryCondition();
+
+    /// Handles counter resets.
+    void ProcessCounterReset();
 
     /// Handles writes to syncing register.
     void ProcessSyncPoint();
@@ -1428,6 +1463,9 @@ private:
 
     // Handles a instance drawcall from MME
     void StepInstance(MMEDrawMode expected_mode, u32 count);
+
+    /// Returns a query's value or an empty object if the value will be deferred through a cache.
+    std::optional<u64> GetQueryResult();
 };
 
 #define ASSERT_REG_POSITION(field_name, position)                                                  \
@@ -1458,8 +1496,8 @@ ASSERT_REG_POSITION(polygon_offset_fill_enable, 0x372);
 ASSERT_REG_POSITION(patch_vertices, 0x373);
 ASSERT_REG_POSITION(scissor_test, 0x380);
 ASSERT_REG_POSITION(stencil_back_func_ref, 0x3D5);
-ASSERT_REG_POSITION(stencil_back_func_mask, 0x3D6);
-ASSERT_REG_POSITION(stencil_back_mask, 0x3D7);
+ASSERT_REG_POSITION(stencil_back_mask, 0x3D6);
+ASSERT_REG_POSITION(stencil_back_func_mask, 0x3D7);
 ASSERT_REG_POSITION(color_mask_common, 0x3E4);
 ASSERT_REG_POSITION(rt_separate_frag_data, 0x3EB);
 ASSERT_REG_POSITION(depth_bounds, 0x3E7);
@@ -1493,7 +1531,10 @@ ASSERT_REG_POSITION(screen_y_control, 0x4EB);
 ASSERT_REG_POSITION(vb_element_base, 0x50D);
 ASSERT_REG_POSITION(vb_base_instance, 0x50E);
 ASSERT_REG_POSITION(clip_distance_enabled, 0x544);
+ASSERT_REG_POSITION(samplecnt_enable, 0x545);
 ASSERT_REG_POSITION(point_size, 0x546);
+ASSERT_REG_POSITION(point_sprite_enable, 0x548);
+ASSERT_REG_POSITION(counter_reset, 0x54C);
 ASSERT_REG_POSITION(zeta_enable, 0x54E);
 ASSERT_REG_POSITION(multisample_control, 0x54F);
 ASSERT_REG_POSITION(condition, 0x554);
